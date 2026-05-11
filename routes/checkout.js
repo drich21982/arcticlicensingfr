@@ -36,7 +36,7 @@ router.post("/create-session", auth, async (req, res) => {
       mode: "payment",
       customer_email: req.user.email,
       success_url: publicUrl(`/dashboard/licenses.html?checkout=success&session_id={CHECKOUT_SESSION_ID}`),
-      cancel_url: publicUrl(`/products/detail.html?id=${encodeURIComponent(product.id)}&checkout=cancelled`),
+      cancel_url: publicUrl(`/products/details.html?id=${encodeURIComponent(product.id)}&checkout=cancelled`),
       metadata: {
         user_id: String(req.user.id),
         product_id: String(product.id)
