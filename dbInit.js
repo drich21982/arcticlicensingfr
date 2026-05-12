@@ -66,6 +66,14 @@ async function columnExists(tableName, columnName) {
   return !!column;
 }
 
+
+async function addColumnIfMissing(tableName, columnSql) {
+  const exists = await tableExists(tableName);
+  if (!exists) return;
+
+  await pool.query(`ALTER TABLE ${tableName} ADD COLUMN IF NOT EXISTS ${columnSql}`);
+}
+
 async function ensureStatusConstraint(tableName, constraintName) {
   const exists = await tableExists(tableName);
   if (!exists) return;
@@ -150,6 +158,18 @@ async function ensureSchema() {
   await ensureStatusConstraint("products", "products_status_check");
   await ensureStatusConstraint("downloads", "downloads_status_check");
   await ensureStatusConstraint("licenses", "licenses_status_check");
+
+  await addColumnIfMissing("downloads", "file_path TEXT");
+  await addColumnIfMissing("downloads", "stored_filename TEXT");
+  await addColumnIfMissing("downloads", "original_filename TEXT");
+  await addColumnIfMissing("downloads", "mime_type TEXT");
+  await addColumnIfMissing("downloads", "file_size BIGINT");
+  await addColumnIfMissing("downloads", "changelog TEXT");
+  await addColumnIfMissing("downloads", "is_latest BOOLEAN DEFAULT FALSE");
+  await addColumnIfMissing("downloads", `uploaded_by ${usersIdSqlType} REFERENCES users(id) ON DELETE SET NULL`);
+  await addColumnIfMissing("downloads", "updated_at TIMESTAMPTZ DEFAULT NOW()");
+
+  await pool.query(`CREATE INDEX IF NOT EXISTS downloads_product_latest_idx ON downloads(product_id, is_latest, status)`);
 
   const founderEmail = String(process.env.ADMIN_SEED_EMAIL || "").trim().toLowerCase();
 
