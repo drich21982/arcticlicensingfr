@@ -21,7 +21,7 @@ async function fulfillCheckout(session) {
       throw new Error(`Checkout session is not paid. Current status: ${session.payment_status}`);
     }
 
-    const userId = Number(session.metadata?.user_id);
+    const userId = String(session.metadata?.user_id || "").trim();
     const productId = session.metadata?.product_id;
 
     if (!userId || !productId) {
