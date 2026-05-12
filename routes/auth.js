@@ -2,6 +2,7 @@ const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const pool = require("../db");
+const { isFounderUser, getPermissions } = require("../middleware/auth");
 const router = express.Router();
 
 function sign(user) {
@@ -36,6 +37,8 @@ router.post("/register", async (req, res) => {
     );
 
     const user = result.rows[0];
+    user.is_founder = isFounderUser(user);
+    user.permissions = user.role === "admin" ? await getPermissions(user.id) : [];
 
     res.json({
       token: sign(user),
@@ -52,7 +55,7 @@ router.post("/login", async (req, res) => {
     const { email, password } = req.body;
 
     const result = await pool.query(
-      "SELECT id, name, email, password_hash, role, created_at FROM users WHERE lower(email) = lower($1)",
+      "SELECT id, name, email, password_hash, role, created_at, COALESCE(disabled, FALSE) AS disabled FROM users WHERE lower(email) = lower($1)",
       [email]
     );
 
@@ -61,7 +64,12 @@ router.post("/login", async (req, res) => {
     }
 
     const row = result.rows[0];
-    const ok = await bcrypt.compare(password, row.password_hash);
+
+    if (row.disabled) {
+      return res.status(403).json({ error: "Account disabled" });
+    }
+
+    const ok = await bcrypt.compare(password, row.password_hash || "");
 
     if (!ok) {
       return res.status(401).json({ error: "Invalid email or password" });
@@ -72,7 +80,9 @@ router.post("/login", async (req, res) => {
       name: row.name,
       email: row.email,
       role: row.role,
-      created_at: row.created_at
+      created_at: row.created_at,
+      is_founder: isFounderUser(row),
+      permissions: row.role === "admin" ? await getPermissions(row.id) : []
     };
 
     res.json({
