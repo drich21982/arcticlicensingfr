@@ -3,6 +3,7 @@ const Stripe = require("stripe");
 const pool = require("../db");
 const { auth } = require("../middleware/auth");
 const { publicUrl } = require("../utils");
+const { fulfillCheckout } = require("../fulfillCheckout");
 const router = express.Router();
 
 const stripe = process.env.STRIPE_SECRET_KEY
@@ -69,6 +70,34 @@ router.post("/create-session", auth, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to create checkout session" });
+  }
+});
+
+
+router.get("/confirm-session/:sessionId", auth, async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(500).json({ error: "Stripe is not configured" });
+    }
+
+    const sessionId = String(req.params.sessionId || "").trim();
+
+    if (!sessionId.startsWith("cs_")) {
+      return res.status(400).json({ error: "Invalid checkout session" });
+    }
+
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    const sessionUserId = String(session.metadata?.user_id || "").trim();
+
+    if (sessionUserId !== String(req.user.id)) {
+      return res.status(403).json({ error: "This checkout session does not belong to your account" });
+    }
+
+    const result = await fulfillCheckout(session);
+    res.json(result);
+  } catch (err) {
+    console.error("Checkout confirmation failed:", err);
+    res.status(500).json({ error: err.message || "Failed to confirm checkout" });
   }
 });
 
