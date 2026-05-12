@@ -1,11 +1,37 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
+const fs = require("fs");
+const path = require("path");
+const multer = require("multer");
 const pool = require("../db");
 const { auth, requireAdmin, requirePermission, hasPermission, isFounderUser } = require("../middleware/auth");
 const { licenseKey } = require("../utils");
 const { ADMIN_PERMISSION_KEYS } = require("../dbInit");
 
 const router = express.Router();
+
+const uploadRoot = path.join(__dirname, "..", "uploads", "product-files");
+fs.mkdirSync(uploadRoot, { recursive: true });
+
+function safeUploadName(name = "download.zip") {
+  const ext = path.extname(name).toLowerCase() || ".zip";
+  const base = path.basename(name, ext).toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "download";
+  return `${base}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
+}
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, uploadRoot),
+    filename: (_req, file, cb) => cb(null, safeUploadName(file.originalname))
+  }),
+  limits: { fileSize: Number(process.env.MAX_UPLOAD_MB || 250) * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname || "").toLowerCase();
+    const allowed = [".zip", ".rar", ".7z"];
+    if (!allowed.includes(ext)) return cb(new Error("Only ZIP/RAR/7Z product archives are allowed"));
+    cb(null, true);
+  }
+});
 
 router.use(auth, requireAdmin);
 
@@ -422,41 +448,75 @@ router.patch("/licenses/:id/status", requirePermission("licenses.disable"), asyn
 });
 
 router.get("/downloads", async (req, res) => {
-  const result = await pool.query(
-    `SELECT d.*, p.name AS product_name
-     FROM downloads d
-     JOIN products p ON p.id = d.product_id
-     ORDER BY d.created_at DESC`
-  );
-  res.json(result.rows);
-});
-
-router.post("/downloads", requirePermission("downloads.create"), async (req, res) => {
   try {
-    const { product_id, title, file_url, version, status } = req.body;
-
-    if (!product_id || !title || !file_url) {
-      return res.status(400).json({ error: "product_id, title, and file_url are required" });
-    }
-
     const result = await pool.query(
-      `INSERT INTO downloads (product_id, title, file_url, version, status)
-       VALUES ($1, $2, $3, $4, COALESCE($5,'active'))
-       RETURNING *`,
-      [product_id, title, file_url, version || "1.0.0", status || "active"]
+      `SELECT d.*, p.name AS product_name
+       FROM downloads d
+       JOIN products p ON p.id = d.product_id
+       ORDER BY d.created_at DESC`
     );
-
-    await logAdmin(req.user.id, "download.create", { product_id, title });
-    res.json(result.rows[0]);
+    res.json(result.rows);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Failed to create download" });
+    res.status(500).json({ error: "Failed to load downloads" });
   }
 });
 
-router.patch("/downloads/:id", requirePermission("downloads.edit"), async (req, res) => {
+router.post("/downloads", requirePermission("downloads.create"), upload.single("file"), async (req, res) => {
   try {
-    const fields = ["title", "file_url", "version", "status"];
+    const { product_id, title, file_url, version, status, changelog } = req.body;
+
+    if (!product_id) {
+      return res.status(400).json({ error: "product_id is required" });
+    }
+
+    if (!req.file && !file_url) {
+      return res.status(400).json({ error: "Upload a product archive or provide a file_url" });
+    }
+
+    if ((status || "active") === "active") {
+      await pool.query(
+        `UPDATE downloads SET is_latest = FALSE, updated_at = NOW() WHERE product_id = $1`,
+        [product_id]
+      );
+    }
+
+    const downloadTitle = title || req.file?.originalname || "Product Download";
+
+    const result = await pool.query(
+      `INSERT INTO downloads
+       (product_id, title, file_url, version, status, changelog, is_latest, file_path, stored_filename, original_filename, mime_type, file_size, uploaded_by)
+       VALUES ($1, $2, $3, $4, COALESCE($5,'active'), $6, TRUE, $7, $8, $9, $10, $11, $12)
+       RETURNING *`,
+      [
+        product_id,
+        downloadTitle,
+        file_url || null,
+        version || "1.0.0",
+        status || "active",
+        changelog || "",
+        req.file ? req.file.path : null,
+        req.file ? req.file.filename : null,
+        req.file ? req.file.originalname : null,
+        req.file ? req.file.mimetype : null,
+        req.file ? req.file.size : null,
+        req.user.id
+      ]
+    );
+
+    await pool.query("UPDATE products SET version=$1, updated_at=NOW() WHERE id=$2", [version || "1.0.0", product_id]);
+    await logAdmin(req.user.id, "download.create", { product_id, title: downloadTitle, uploaded_file: !!req.file });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    if (req.file?.path) fs.unlink(req.file.path, () => {});
+    res.status(500).json({ error: err.message || "Failed to create download" });
+  }
+});
+
+router.patch("/downloads/:id", requirePermission("downloads.edit"), upload.single("file"), async (req, res) => {
+  try {
+    const fields = ["title", "file_url", "version", "status", "changelog"];
     const updates = [];
     const values = [];
 
@@ -466,6 +526,23 @@ router.patch("/downloads/:id", requirePermission("downloads.edit"), async (req, 
         updates.push(`${field} = $${values.length}`);
       }
     });
+
+    if (req.file) {
+      values.push(req.file.path); updates.push(`file_path = $${values.length}`);
+      values.push(req.file.filename); updates.push(`stored_filename = $${values.length}`);
+      values.push(req.file.originalname); updates.push(`original_filename = $${values.length}`);
+      values.push(req.file.mimetype); updates.push(`mime_type = $${values.length}`);
+      values.push(req.file.size); updates.push(`file_size = $${values.length}`);
+    }
+
+    const makeLatest = req.body.is_latest === "on" || req.body.is_latest === "true" || req.body.is_latest === true;
+    if (makeLatest) {
+      const existing = await pool.query("SELECT product_id FROM downloads WHERE id=$1", [req.params.id]);
+      if (existing.rows[0]) {
+        await pool.query("UPDATE downloads SET is_latest=FALSE, updated_at=NOW() WHERE product_id=$1", [existing.rows[0].product_id]);
+      }
+      updates.push(`is_latest = TRUE`);
+    }
 
     if (!updates.length) return res.status(400).json({ error: "No fields to update" });
 
@@ -478,22 +555,42 @@ router.patch("/downloads/:id", requirePermission("downloads.edit"), async (req, 
       values
     );
 
-    await logAdmin(req.user.id, "download.update", { download_id: req.params.id });
+    if (!result.rows.length) return res.status(404).json({ error: "Download not found" });
+
+    if (req.body.version) {
+      await pool.query("UPDATE products SET version=$1, updated_at=NOW() WHERE id=$2", [req.body.version, result.rows[0].product_id]);
+    }
+
+    await logAdmin(req.user.id, "download.update", { download_id: req.params.id, uploaded_file: !!req.file });
     res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Failed to update download" });
+    if (req.file?.path) fs.unlink(req.file.path, () => {});
+    res.status(500).json({ error: err.message || "Failed to update download" });
   }
 });
 
 router.delete("/downloads/:id", requirePermission("downloads.delete"), async (req, res) => {
   try {
-    await pool.query("UPDATE downloads SET status='archived', updated_at=NOW() WHERE id=$1", [req.params.id]);
+    await pool.query("UPDATE downloads SET status='archived', is_latest=FALSE, updated_at=NOW() WHERE id=$1", [req.params.id]);
     await logAdmin(req.user.id, "download.archive", { download_id: req.params.id });
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to archive download" });
+  }
+});
+
+router.get("/products/:id/downloads", requirePermission("downloads.edit"), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM downloads WHERE product_id=$1 ORDER BY is_latest DESC, created_at DESC`,
+      [req.params.id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to load product downloads" });
   }
 });
 

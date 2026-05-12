@@ -1,4 +1,6 @@
 const express = require("express");
+const fs = require("fs");
+const path = require("path");
 const { Readable } = require("stream");
 const pool = require("../db");
 const { auth } = require("../middleware/auth");
@@ -78,6 +80,10 @@ router.get("/downloads", async (req, res) => {
           d.title,
           d.version,
           d.status,
+          d.changelog,
+          d.is_latest,
+          d.original_filename,
+          d.file_size,
           d.created_at,
           p.name AS product_name
        FROM downloads d
@@ -87,11 +93,11 @@ router.get("/downloads", async (req, res) => {
          AND l.status = 'active'
          AND d.status = 'active'
          AND p.status = 'active'
-       ORDER BY d.created_at DESC`,
+       ORDER BY d.is_latest DESC, d.created_at DESC`,
       [req.user.id]
     );
 
-    // Important: file_url is intentionally not returned to customers.
+    // Important: raw file paths/URLs are intentionally not returned to customers.
     // Downloads must go through /api/customer/downloads/:id/download.
     res.json(result.rows);
   } catch (err) {
@@ -100,7 +106,91 @@ router.get("/downloads", async (req, res) => {
   }
 });
 
+async function getOwnedDownload(downloadId, userId) {
+  const result = await pool.query(
+    `SELECT DISTINCT
+        d.*,
+        p.name AS product_name
+     FROM downloads d
+     JOIN products p ON p.id = d.product_id
+     JOIN licenses l ON l.product_id = d.product_id
+     WHERE d.id = $1
+       AND l.user_id = $2
+       AND l.status = 'active'
+       AND d.status = 'active'
+       AND p.status = 'active'
+     LIMIT 1`,
+    [downloadId, userId]
+  );
+  return result.rows[0] || null;
+}
+
+async function streamDownload(download, req, res) {
+  const safeName = `${download.product_name || "product"}-${download.version || "download"}`
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "download";
+
+  const localPath = String(download.file_path || "").trim();
+
+  if (localPath) {
+    const resolved = path.resolve(localPath);
+    const uploadRoot = path.resolve(path.join(__dirname, "..", "uploads", "product-files"));
+
+    if (!resolved.startsWith(uploadRoot) || !fs.existsSync(resolved)) {
+      console.error("Missing local download file", { download_id: download.id, file_path: localPath });
+      return res.status(404).json({ error: "Download file is missing on the server" });
+    }
+
+    const ext = path.extname(download.original_filename || download.stored_filename || ".zip") || ".zip";
+    res.setHeader("Content-Type", download.mime_type || "application/octet-stream");
+    res.setHeader("Content-Disposition", `attachment; filename="${safeName}${ext}"`);
+    res.setHeader("Cache-Control", "no-store, private");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    return fs.createReadStream(resolved).pipe(res);
+  }
+
+  const fileUrl = String(download.file_url || "").trim();
+
+  if (!/^https?:\/\//i.test(fileUrl)) {
+    console.error("Invalid download source", { download_id: download.id });
+    return res.status(500).json({ error: "Download file is not configured correctly" });
+  }
+
+  const upstream = await fetch(fileUrl, { redirect: "follow" });
+
+  if (!upstream.ok || !upstream.body) {
+    console.error("Download upstream failed", {
+      download_id: download.id,
+      status: upstream.status,
+      statusText: upstream.statusText
+    });
+    return res.status(502).json({ error: "Download source is unavailable" });
+  }
+
+  res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/zip");
+  res.setHeader("Content-Disposition", `attachment; filename="${safeName}.zip"`);
+  res.setHeader("Cache-Control", "no-store, private");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  return Readable.fromWeb(upstream.body).pipe(res);
+}
+
 router.get("/downloads/:id/download", async (req, res) => {
+  try {
+    const download = await getOwnedDownload(req.params.id, req.user.id);
+
+    if (!download) {
+      return res.status(403).json({ error: "No valid license for this download" });
+    }
+
+    await streamDownload(download, req, res);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to download file" });
+  }
+});
+
+router.get("/products/:id/download/latest", async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT DISTINCT
@@ -109,52 +199,24 @@ router.get("/downloads/:id/download", async (req, res) => {
        FROM downloads d
        JOIN products p ON p.id = d.product_id
        JOIN licenses l ON l.product_id = d.product_id
-       WHERE d.id = $1
+       WHERE d.product_id = $1
          AND l.user_id = $2
          AND l.status = 'active'
          AND d.status = 'active'
          AND p.status = 'active'
+       ORDER BY d.is_latest DESC, d.created_at DESC
        LIMIT 1`,
       [req.params.id, req.user.id]
     );
 
     if (!result.rows.length) {
-      return res.status(403).json({ error: "No valid license for this download" });
+      return res.status(403).json({ error: "No valid license or download for this product" });
     }
 
-    const download = result.rows[0];
-    const fileUrl = String(download.file_url || "").trim();
-
-    if (!/^https?:\/\//i.test(fileUrl)) {
-      console.error("Invalid download file_url", { download_id: download.id, file_url: fileUrl });
-      return res.status(500).json({ error: "Download file is not configured correctly" });
-    }
-
-    const upstream = await fetch(fileUrl, { redirect: "follow" });
-
-    if (!upstream.ok || !upstream.body) {
-      console.error("Download upstream failed", {
-        download_id: download.id,
-        status: upstream.status,
-        statusText: upstream.statusText
-      });
-      return res.status(502).json({ error: "Download source is unavailable" });
-    }
-
-    const safeName = `${download.product_name || "product"}-${download.version || "download"}`
-      .toLowerCase()
-      .replace(/[^a-z0-9._-]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "download";
-
-    res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/zip");
-    res.setHeader("Content-Disposition", `attachment; filename="${safeName}.zip"`);
-    res.setHeader("Cache-Control", "no-store, private");
-    res.setHeader("X-Content-Type-Options", "nosniff");
-
-    Readable.fromWeb(upstream.body).pipe(res);
+    await streamDownload(result.rows[0], req, res);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Failed to download file" });
+    res.status(500).json({ error: "Failed to download latest file" });
   }
 });
 
