@@ -92,6 +92,57 @@ async function ensureStatusConstraint(tableName, constraintName) {
   `);
 }
 
+
+async function ensureCoreCommerceTables(usersIdSqlType) {
+  await pool.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS invoices (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id ${usersIdSqlType} REFERENCES users(id) ON DELETE SET NULL,
+      product_id TEXT REFERENCES products(id) ON DELETE SET NULL,
+      amount_cents INTEGER DEFAULT 0,
+      currency TEXT DEFAULT 'usd',
+      status TEXT DEFAULT 'paid',
+      stripe_session_id TEXT UNIQUE,
+      stripe_payment_intent TEXT,
+      payment_method TEXT DEFAULT 'stripe',
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  await addColumnIfMissing("invoices", `user_id ${usersIdSqlType} REFERENCES users(id) ON DELETE SET NULL`);
+  await addColumnIfMissing("invoices", "product_id TEXT REFERENCES products(id) ON DELETE SET NULL");
+  await addColumnIfMissing("invoices", "amount_cents INTEGER DEFAULT 0");
+  await addColumnIfMissing("invoices", "currency TEXT DEFAULT 'usd'");
+  await addColumnIfMissing("invoices", "status TEXT DEFAULT 'paid'");
+  await addColumnIfMissing("invoices", "stripe_session_id TEXT");
+  await addColumnIfMissing("invoices", "stripe_payment_intent TEXT");
+  await addColumnIfMissing("invoices", "payment_method TEXT DEFAULT 'stripe'");
+  await addColumnIfMissing("invoices", "created_at TIMESTAMPTZ DEFAULT NOW()");
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS invoices_stripe_session_id_uidx ON invoices(stripe_session_id) WHERE stripe_session_id IS NOT NULL`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS licenses (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      license_key TEXT UNIQUE NOT NULL,
+      product_id TEXT REFERENCES products(id) ON DELETE CASCADE,
+      user_id ${usersIdSqlType} REFERENCES users(id) ON DELETE CASCADE,
+      status TEXT DEFAULT 'active',
+      max_activations INTEGER DEFAULT 1,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  await addColumnIfMissing("licenses", "license_key TEXT");
+  await addColumnIfMissing("licenses", "product_id TEXT REFERENCES products(id) ON DELETE CASCADE");
+  await addColumnIfMissing("licenses", `user_id ${usersIdSqlType} REFERENCES users(id) ON DELETE CASCADE`);
+  await addColumnIfMissing("licenses", "status TEXT DEFAULT 'active'");
+  await addColumnIfMissing("licenses", "max_activations INTEGER DEFAULT 1");
+  await addColumnIfMissing("licenses", "created_at TIMESTAMPTZ DEFAULT NOW()");
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS licenses_license_key_uidx ON licenses(license_key) WHERE license_key IS NOT NULL`);
+}
+
 async function ensureSchema() {
   const usersExists = await tableExists("users");
   if (!usersExists) {
@@ -107,6 +158,8 @@ async function ensureSchema() {
   const usersIdColumn = await getColumnType("users", "id");
   const usersIdSqlType = sqlTypeFromColumn(usersIdColumn);
   const usersIdUdt = usersIdColumn?.udt_name || "uuid";
+
+  await ensureCoreCommerceTables(usersIdSqlType);
 
   const permissionsExists = await tableExists("admin_permissions");
 
