@@ -5,6 +5,7 @@ const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
 const { normalizeOrigin } = require("./utils");
+const { ensureSchema } = require("./dbInit");
 
 const app = express();
 
@@ -78,6 +79,14 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Atlas Product Hub API running on port ${PORT}`);
-});
+
+ensureSchema()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`Atlas Product Hub API running on port ${PORT}`);
+    });
+  })
+  .catch(err => {
+    console.error("Database initialization failed:", err);
+    process.exit(1);
+  });
