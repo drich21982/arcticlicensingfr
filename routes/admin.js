@@ -485,13 +485,14 @@ router.post("/downloads", requirePermission("downloads.create"), upload.single("
 
     const result = await pool.query(
       `INSERT INTO downloads
-       (product_id, title, file_url, version, status, changelog, is_latest, file_path, stored_filename, original_filename, mime_type, file_size, uploaded_by)
-       VALUES ($1, $2, $3, $4, COALESCE($5,'active'), $6, TRUE, $7, $8, $9, $10, $11, $12)
+       (product_id, title, file_url, file_name, version, status, changelog, is_latest, file_path, stored_filename, original_filename, mime_type, file_size, uploaded_by)
+       VALUES ($1, $2, $3, $4, $5, COALESCE($6,'active'), $7, TRUE, $8, $9, $10, $11, $12, $13)
        RETURNING *`,
       [
         product_id,
         downloadTitle,
         file_url || null,
+        req.file?.originalname || file_url || downloadTitle,
         version || "1.0.0",
         status || "active",
         changelog || "",
@@ -531,6 +532,7 @@ router.patch("/downloads/:id", requirePermission("downloads.edit"), upload.singl
       values.push(req.file.path); updates.push(`file_path = $${values.length}`);
       values.push(req.file.filename); updates.push(`stored_filename = $${values.length}`);
       values.push(req.file.originalname); updates.push(`original_filename = $${values.length}`);
+      values.push(req.file.originalname); updates.push(`file_name = $${values.length}`);
       values.push(req.file.mimetype); updates.push(`mime_type = $${values.length}`);
       values.push(req.file.size); updates.push(`file_size = $${values.length}`);
     }
