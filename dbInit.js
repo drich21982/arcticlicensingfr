@@ -99,6 +99,7 @@ async function ensureCoreCommerceTables(usersIdSqlType) {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS invoices (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      invoice_number TEXT UNIQUE,
       user_id ${usersIdSqlType} REFERENCES users(id) ON DELETE SET NULL,
       product_id TEXT REFERENCES products(id) ON DELETE SET NULL,
       amount_cents INTEGER DEFAULT 0,
@@ -111,6 +112,7 @@ async function ensureCoreCommerceTables(usersIdSqlType) {
     )
   `);
 
+  await addColumnIfMissing("invoices", "invoice_number TEXT");
   await addColumnIfMissing("invoices", `user_id ${usersIdSqlType} REFERENCES users(id) ON DELETE SET NULL`);
   await addColumnIfMissing("invoices", "product_id TEXT REFERENCES products(id) ON DELETE SET NULL");
   await addColumnIfMissing("invoices", "amount_cents INTEGER DEFAULT 0");
@@ -121,6 +123,7 @@ async function ensureCoreCommerceTables(usersIdSqlType) {
   await addColumnIfMissing("invoices", "payment_method TEXT DEFAULT 'stripe'");
   await addColumnIfMissing("invoices", "created_at TIMESTAMPTZ DEFAULT NOW()");
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS invoices_stripe_session_id_uidx ON invoices(stripe_session_id) WHERE stripe_session_id IS NOT NULL`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS invoices_invoice_number_uidx ON invoices(invoice_number) WHERE invoice_number IS NOT NULL`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS licenses (
