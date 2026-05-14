@@ -1,120 +1,86 @@
-const express = require("express");
-const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const pool = require("../db");
-const { isFounderUser, getPermissions } = require("../middleware/auth");
-const router = express.Router();
 
-function sign(user) {
-  return jwt.sign(
-    { id: user.id, email: user.email, role: user.role },
-    process.env.JWT_SECRET,
-    { expiresIn: "7d" }
-  );
+function founderEmail() {
+  return String(process.env.ADMIN_SEED_EMAIL || "").trim().toLowerCase();
 }
 
-function safeUser(row, permissions = []) {
-  return {
-    id: row.id,
-    name: row.name,
-    email: row.email,
-    role: row.role,
-    created_at: row.created_at,
-    is_founder: isFounderUser(row),
-    permissions
-  };
+function isFounderUser(user) {
+  return !!user && user.role === "admin" && String(user.email || "").toLowerCase() === founderEmail();
 }
 
-async function findUserByEmail(email) {
+async function getPermissions(userId) {
   const result = await pool.query(
-    "SELECT id, name, email, password_hash, role, created_at, COALESCE(disabled, FALSE) AS disabled FROM users WHERE lower(email) = lower($1)",
-    [email]
+    "SELECT permission FROM admin_permissions WHERE user_id = $1 AND allowed = TRUE",
+    [userId]
   );
-  return result.rows[0] || null;
+  return result.rows.map(row => row.permission);
 }
 
-async function loginWithRole(req, res, expectedRole) {
+async function auth(req, res, next) {
   try {
-    const { email, password } = req.body;
+    const header = req.headers.authorization || "";
+    const token = header.startsWith("Bearer ") ? header.slice(7) : null;
 
-    if (!email || !password) {
-      return res.status(400).json({ error: "Email and password are required" });
+    if (!token) {
+      return res.status(401).json({ error: "Missing authorization token" });
     }
 
-    const row = await findUserByEmail(email);
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    const result = await pool.query(
+      `SELECT id, email, name, role, created_at, COALESCE(disabled, FALSE) AS disabled
+       FROM users
+       WHERE id = $1`,
+      [payload.id]
+    );
 
-    if (!row) {
-      return res.status(401).json({ error: "Invalid email or password" });
+    if (!result.rows.length) {
+      return res.status(401).json({ error: "Invalid user" });
     }
 
-    if (row.disabled) {
+    const user = result.rows[0];
+
+    if (user.disabled) {
       return res.status(403).json({ error: "Account disabled" });
     }
 
-    const ok = await bcrypt.compare(password, row.password_hash || "");
+    user.is_founder = isFounderUser(user);
+    user.permissions = user.role === "admin" ? await getPermissions(user.id) : [];
 
-    if (!ok) {
-      return res.status(401).json({ error: "Invalid email or password" });
-    }
-
-    if (expectedRole === "customer" && row.role === "admin") {
-      return res.status(403).json({ error: "Use the admin login for this account" });
-    }
-
-    if (expectedRole === "admin" && row.role !== "admin") {
-      return res.status(403).json({ error: "Admin access required" });
-    }
-
-    const permissions = row.role === "admin" ? await getPermissions(row.id) : [];
-    const user = safeUser(row, permissions);
-
-    res.json({ token: sign(user), user });
+    req.user = user;
+    next();
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Login failed" });
+    return res.status(401).json({ error: "Unauthorized" });
   }
 }
 
-router.post("/register", async (req, res) => {
-  try {
-    const { name, email, password } = req.body;
-
-    if (!name || !email || !password) {
-      return res.status(400).json({ error: "Name, email, and password are required" });
-    }
-
-    const existing = await pool.query("SELECT id FROM users WHERE lower(email) = lower($1)", [email]);
-
-    if (existing.rows.length) {
-      return res.status(409).json({ error: "Email already exists" });
-    }
-
-    const hash = await bcrypt.hash(password, 12);
-
-    const result = await pool.query(
-      `INSERT INTO users (name, email, password_hash, role)
-       VALUES ($1, lower($2), $3, 'customer')
-       RETURNING id, name, email, role, created_at`,
-      [name, email, hash]
-    );
-
-    const row = result.rows[0];
-    const user = safeUser(row, []);
-
-    res.json({ token: sign(user), user });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Registration failed" });
+function requireAdmin(req, res, next) {
+  if (!req.user || req.user.role !== "admin") {
+    return res.status(403).json({ error: "Admin access required" });
   }
-});
+  next();
+}
 
-// Legacy endpoint retained for old pages, but now behaves as CUSTOMER login only.
-router.post("/login", (req, res) => loginWithRole(req, res, "customer"));
+function hasPermission(user, permission) {
+  if (!user || user.role !== "admin") return false;
+  if (user.is_founder) return true;
+  if (Array.isArray(user.permissions) && user.permissions.includes("*")) return true;
+  return Array.isArray(user.permissions) && user.permissions.includes(permission);
+}
 
-// Customer login: admin accounts are rejected here so customers never land in admin by accident.
-router.post("/customer-login", (req, res) => loginWithRole(req, res, "customer"));
+function requirePermission(permission) {
+  return (req, res, next) => {
+    if (hasPermission(req.user, permission)) return next();
+    return res.status(403).json({ error: `Missing permission: ${permission}` });
+  };
+}
 
-// Admin login: customer accounts are rejected here.
-router.post("/admin-login", (req, res) => loginWithRole(req, res, "admin"));
-
-module.exports = router;
+module.exports = {
+  auth,
+  requireAdmin,
+  requirePermission,
+  hasPermission,
+  isFounderUser,
+  founderEmail,
+  getPermissions
+};
