@@ -57,6 +57,7 @@ app.use("/api/checkout", require("./routes/checkout"));
 app.use("/api/stripe", require("./routes/stripe"));
 
 app.use("/api/verify", verifyRoutes);
+app.use("/api/admin/activations", require("./routes/adminActivations"));
 
 app.use((req, res) => {
   res.status(404).json({ error: "Route not found" });
