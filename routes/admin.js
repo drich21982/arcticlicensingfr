@@ -654,4 +654,141 @@ router.get("/logs", requirePermission("logs.view"), async (req, res) => {
   res.json(result.rows);
 });
 
+router.get("/licenses/:id", async (req, res) => {
+  try {
+    const licenseResult = await pool.query(
+      `
+      SELECT
+        l.*,
+        p.name AS product_name,
+        u.email AS customer_email
+      FROM licenses l
+      LEFT JOIN products p ON p.id = l.product_id
+      LEFT JOIN users u ON u.id = l.user_id
+      WHERE l.id = $1
+      `,
+      [req.params.id]
+    );
+
+    if (!licenseResult.rows.length) {
+      return res.status(404).json({
+        error: "License not found"
+      });
+    }
+
+    const activationsResult = await pool.query(
+      `
+      SELECT *
+      FROM license_activations
+      WHERE license_id = $1
+      ORDER BY last_seen_at DESC NULLS LAST
+      `,
+      [req.params.id]
+    );
+
+    res.json({
+      license: licenseResult.rows[0],
+      activations: activationsResult.rows
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      error: "Failed to load license"
+    });
+  }
+});
+
+router.post("/licenses/:id/disable", async (req, res) => {
+  try {
+    await pool.query(
+      `
+      UPDATE licenses
+      SET status = 'disabled'
+      WHERE id = $1
+      `,
+      [req.params.id]
+    );
+
+    res.json({
+      success: true
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      error: "Failed to disable license"
+    });
+  }
+});
+
+router.post("/licenses/:id/enable", async (req, res) => {
+  try {
+    await pool.query(
+      `
+      UPDATE licenses
+      SET status = 'active'
+      WHERE id = $1
+      `,
+      [req.params.id]
+    );
+
+    res.json({
+      success: true
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      error: "Failed to enable license"
+    });
+  }
+});
+
+router.put("/licenses/:id/max-activations", async (req, res) => {
+  try {
+    const max = Number(req.body.max_activations);
+
+    await pool.query(
+      `
+      UPDATE licenses
+      SET max_activations = $2
+      WHERE id = $1
+      `,
+      [
+        req.params.id,
+        max
+      ]
+    );
+
+    res.json({
+      success: true
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      error: "Failed to update activation limit"
+    });
+  }
+});
+
+router.delete("/licenses/:id", async (req, res) => {
+  try {
+    await pool.query(
+      `
+      UPDATE licenses
+      SET status = 'revoked'
+      WHERE id = $1
+      `,
+      [req.params.id]
+    );
+
+    res.json({
+      success: true
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      error: "Failed to revoke license"
+    });
+  }
+});
+
 module.exports = router;
