@@ -6,6 +6,7 @@ const helmet = require("helmet");
 const morgan = require("morgan");
 const { normalizeOrigin } = require("./utils");
 const { ensureSchema } = require("./dbInit");
+const verifyRoutes = require("./routes/verify");
 
 const app = express();
 
@@ -65,6 +66,8 @@ app.use("/api/customer", require("./routes/customer"));
 app.use("/api/admin", require("./routes/admin"));
 app.use("/api/checkout", require("./routes/checkout"));
 app.use("/api/stripe", require("./routes/stripe"));
+
+app.use("/api/verify", verifyRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: "Route not found" });
